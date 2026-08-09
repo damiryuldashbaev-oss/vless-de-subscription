@@ -1,0 +1,30 @@
+name: Auto Update DE Subscription
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' # Автоматический запуск каждые 6 часов
+  workflow_dispatch: # Кнопка для ручного запуска в любое время
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Run generator script
+        run: python generate_sub.py
+
+      - name: Commit and push updated subscription files
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add sub_de.txt sub_de_b64.txt
+          git diff-index --quiet HEAD || git commit -m "Auto-update Germany VLESS list"
+          git push
