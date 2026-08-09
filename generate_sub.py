@@ -4,27 +4,31 @@ import base64
 import json
 import re
 
-# Рабочие и актуальные источники подписок VLESS
+# Стабильные и живые источники VLESS/Xray
 SOURCES = [
-    "https://raw.githubusercontent.com/yebekhe/TVC/main/subscriptions/xray/base64",
-    "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt",
-    "https://raw.githubusercontent.com/EbrahimAfrasiabi/v2ray-subscription/main/data/v2ray.txt",
-    "https://raw.githubusercontent.com/freefq/free/master/v2ray"
+    # Мощный обновляемый агрегатор
+    "https://raw.githubusercontent.com/barry-far/V2ray-Configs/main/Sub1.txt",
+    "https://raw.githubusercontent.com/barry-far/V2ray-Configs/main/Sub2.txt",
+    # Резервные стабильные зеркала
+    "https://raw.githubusercontent.com/vysecurity/v2ray-collector/main/v2ray.txt",
+    "https://raw.githubusercontent.com/mftb-group/v2ray-configs/main/all.txt"
 ]
 
 MAX_SERVERS = 15
 
 def fetch_raw_vless():
     links = []
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    }
     
     for src in SOURCES:
         try:
             req = urllib.request.Request(src, headers=headers)
-            with urllib.request.urlopen(req, timeout=12) as resp:
+            with urllib.request.urlopen(req, timeout=15) as resp:
                 content = resp.read().decode('utf-8', errors='ignore').strip()
                 
-                # Если файл зашифрован в Base64 (стандарт подписок)
+                # Попытка декодировать Base64, если подписка зашифрована
                 try:
                     decoded = base64.b64decode(content).decode('utf-8', errors='ignore')
                     if "vless://" in decoded or "vmess://" in decoded:
@@ -37,12 +41,12 @@ def fetch_raw_vless():
                     if line.startswith("vless://"):
                         links.append(line)
         except Exception as e:
-            print(f"Ошибка загрузки {src}: {e}")
+            print(f"[-] Пропущен источник {src}: {e}")
             
     return links
 
 def extract_host(vless_link):
-    """Извлекает IP или домен из vless://uuid@host:port"""
+    """Извлекает хост/IP из vless-ссылки"""
     try:
         after_at = vless_link.split("@")[1]
         host_port = after_at.split("?")[0].split("#")[0]
@@ -52,11 +56,12 @@ def extract_host(vless_link):
         return None
 
 def is_germany(host, tag):
-    """Проверяет принадлежность к Германии по названию или домену"""
+    """Проверяет принадлежность к Германии"""
     tag_decoded = urllib.parse.unquote(tag)
     
-    # Ключевые слова немецких локаций
-    if re.search(r'(🇩🇪|DE|Germany|Frankfurt|Nuremberg|Falkenstein|Hessen|Berlin)', tag_decoded, re.IGNORECASE):
+    # Регулярка для поисков немецких гео-тегов
+    de_pattern = r'(🇩🇪|DE\b|Germany|Frankfurt|Nuremberg|Falkenstein|Hessen|Berlin)'
+    if re.search(de_pattern, tag_decoded, re.IGNORECASE):
         return True
         
     if host and host.endswith(".de"):
@@ -67,11 +72,12 @@ def is_germany(host, tag):
 def main():
     print("Собираем VLESS ссылки...")
     raw_links = fetch_raw_vless()
-    print(f"Найдено всего VLESS: {len(raw_links)}")
+    print(f"Всего получено VLESS: {len(raw_links)}")
 
     de_servers = []
     seen = set()
 
+    # 1. Сначала отбираем строго немецкие серверы
     for link in raw_links:
         if link in seen:
             continue
@@ -82,13 +88,14 @@ def main():
         if is_germany(host, tag):
             seen.add(link)
             de_servers.append(link)
-            print(f"[+] Добавлен немецкий сервер: {tag_decoded if 'tag_decoded' in locals() else tag or host}")
             if len(de_servers) >= MAX_SERVERS:
                 break
 
-    # Страховка: если по тегам DE не нашлось 15 штук, добираем из общего списка VLESS
-    if len(de_servers) < 5:
-        print("⚠️ Немецких серверов мало или не найдено. Добавляем доступные VLESS...")
+    print(f"Найдено немецких серверов: {len(de_servers)}")
+
+    # 2. Если немецких не хватило, дополняем обычными VLESS, чтобы подписка НЕ была пустой
+    if len(de_servers) < MAX_SERVERS:
+        print("Добираем резервные VLESS для заполнения списка...")
         for link in raw_links:
             if link not in seen:
                 seen.add(link)
@@ -96,18 +103,19 @@ def main():
                 if len(de_servers) >= MAX_SERVERS:
                     break
 
-    print(f"Итого серверов в подписке: {len(de_servers)}")
+    print(f"Итого серверов в файле: {len(de_servers)}")
 
+    # Запись открытого списка
     plain_text = "\n".join(de_servers)
-    
     with open("sub_de.txt", "w", encoding="utf-8") as f:
         f.write(plain_text)
 
+    # Запись Base64 подписки
     b64_text = base64.b64encode(plain_text.encode('utf-8')).decode('utf-8')
     with open("sub_de_b64.txt", "w", encoding="utf-8") as f:
         f.write(b64_text)
         
-    print("Файлы подписки успешно обновлены!")
+    print("Готово! Файлы успешно обновлены.")
 
 if __name__ == "__main__":
     main()
