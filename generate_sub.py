@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Генератор подписки с реальной проверкой VLESS-серверов через Xray-core.
-Отбирает до 30 рабочих ключей (приоритет немецким) и сохраняет в plain text и Base64.
+Генератор подписки с двухэтапной проверкой и диагностикой.
+Если не найдено ни одного Xray-рабочего ключа, используем TCP-проверенные (как запасной вариант).
 """
 
 import urllib.request
@@ -22,19 +22,42 @@ SOURCE_URLS = [
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-all.txt"
 ]
 TARGET_COUNT = 30
-TEST_URL = "https://api.ipify.org?format=json"
-TIMEOUT = 8  # таймаут на проверку одного ключа (сек)
-DELAY = 1    # пауза между запусками Xray
+TCP_TIMEOUT = 1.5
+XRAY_TIMEOUT = 5
+DELAY_BETWEEN = 0.3
+DELAY_BETWEEN_XRAY = 0.5
 GERMAN_TAGS = ["DE", "Germany", "Frankfurt", "de", "germany", "frankfurt"]
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+TEST_URL = "https://api.ipify.org?format=json"
 
-# ------------------ Вспомогательные функции ------------------
+# ------------------ TCP-проверка ------------------
+def extract_host_port(link: str) -> Tuple[Optional[str], Optional[int]]:
+    match = re.search(r'vless://[^@]+@([^:]+):(\d+)', link)
+    if match:
+        return match.group(1), int(match.group(2))
+    return None, None
+
+def is_port_open(host: str, port: int, timeout: float = TCP_TIMEOUT) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except:
+        return False
+
+def is_vless_tcp_alive(link: str) -> bool:
+    host, port = extract_host_port(link)
+    if host is None or port is None:
+        return False
+    return is_port_open(host, port)
+
+# ------------------ Проверка через Xray ------------------
 def get_my_ip() -> str:
-    """Возвращает реальный внешний IP (без прокси)."""
     try:
         r = requests.get(TEST_URL, timeout=5)
-        return r.json().get('ip', '')
-    except:
+        data = r.json()
+        return data.get('ip', '')
+    except Exception as e:
+        print(f"Не удалось получить реальный IP: {e}")
         return ''
 
 def is_german(link: str) -> bool:
@@ -42,19 +65,12 @@ def is_german(link: str) -> bool:
     return any(tag.lower() in link_lower for tag in GERMAN_TAGS)
 
 def parse_vless_link(link: str) -> Optional[dict]:
-    """
-    Разбирает vless:// ссылку и возвращает словарь с параметрами.
-    Формат: vless://UUID@HOST:PORT?params
-    """
-    # Убираем префикс
     if not link.startswith('vless://'):
         return None
-    body = link[8:]  # после vless://
-    # Разделяем на часть до @ и после
+    body = link[8:]
     if '@' not in body:
         return None
     uuid_part, rest = body.split('@', 1)
-    # rest содержит host:port?params
     if '?' in rest:
         host_port, query = rest.split('?', 1)
     else:
@@ -66,48 +82,32 @@ def parse_vless_link(link: str) -> Optional[dict]:
         port = int(port_str)
     except:
         return None
-    # Парсим параметры query
     params = {}
     if query:
         for item in query.split('&'):
             if '=' in item:
                 k, v = item.split('=', 1)
                 params[k] = v
-    # Формируем конфиг
-    config = {
-        'uuid': uuid_part,
-        'host': host,
-        'port': port,
-        'params': params
-    }
-    return config
+    return {'uuid': uuid_part, 'host': host, 'port': port, 'params': params}
 
 def build_xray_config(vless_config: dict) -> dict:
-    """
-    Создаёт JSON-конфиг для Xray с inbounds (SOCKS5) и outbound (VLESS).
-    """
     uuid = vless_config['uuid']
     host = vless_config['host']
     port = vless_config['port']
     params = vless_config.get('params', {})
 
-    # Базовый outbound
     outbound = {
         "protocol": "vless",
         "settings": {
-            "vnext": [
-                {
-                    "address": host,
-                    "port": port,
-                    "users": [
-                        {
-                            "id": uuid,
-                            "encryption": params.get('encryption', 'none'),
-                            "flow": params.get('flow', '')
-                        }
-                    ]
-                }
-            ]
+            "vnext": [{
+                "address": host,
+                "port": port,
+                "users": [{
+                    "id": uuid,
+                    "encryption": params.get('encryption', 'none'),
+                    "flow": params.get('flow', '')
+                }]
+            }]
         },
         "streamSettings": {
             "network": params.get('type', 'tcp'),
@@ -118,64 +118,39 @@ def build_xray_config(vless_config: dict) -> dict:
         }
     }
 
-    # Настройка транспорта
     network = outbound['streamSettings']['network']
     if network == 'ws':
         outbound['streamSettings']['wsSettings'] = {
             "path": params.get('path', '/'),
-            "headers": {
-                "Host": params.get('host', host)
-            }
+            "headers": {"Host": params.get('host', host)}
         }
     elif network == 'grpc':
         outbound['streamSettings']['grpcSettings'] = {
             "serviceName": params.get('serviceName', '')
         }
-    elif network == 'tcp' and 'security' in params and params['security'] == 'tls':
-        outbound['streamSettings']['tlsSettings'] = {
-            "serverName": params.get('sni', host),
-            "allowInsecure": False
-        }
-
     if params.get('security') == 'tls':
         outbound['streamSettings']['security'] = 'tls'
         outbound['streamSettings']['tlsSettings']['serverName'] = params.get('sni', host)
 
-    # Inbounds (SOCKS5 на локальном порту)
     inbound = {
         "listen": "127.0.0.1",
         "port": 1080,
         "protocol": "socks",
-        "settings": {
-            "auth": "noauth",
-            "udp": True
-        }
+        "settings": {"auth": "noauth", "udp": True}
     }
+    return {"log": {"loglevel": "warning"}, "inbounds": [inbound], "outbounds": [outbound]}
 
-    full_config = {
-        "log": {"loglevel": "warning"},
-        "inbounds": [inbound],
-        "outbounds": [outbound]
-    }
-    return full_config
-
-def test_vless_link(link: str) -> bool:
-    """
-    Проверяет, работает ли VLESS-ссылка, запуская Xray и делая запрос через SOCKS5.
-    Возвращает True, если удалось получить внешний IP через прокси и он отличается от реального.
-    """
+def test_vless_xray(link: str) -> bool:
     parsed = parse_vless_link(link)
     if not parsed:
+        print("  [Xray] Не удалось распарсить ссылку")
         return False
 
     config = build_xray_config(parsed)
-
-    # Создаём временный файл конфига
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
         json.dump(config, f, indent=2)
         config_path = f.name
 
-    # Запускаем Xray
     proc = None
     try:
         proc = subprocess.Popen(
@@ -183,103 +158,103 @@ def test_vless_link(link: str) -> bool:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )
-        # Даём время на запуск
-        time.sleep(1.5)
-
-        # Проверяем через SOCKS5
-        proxies = {
-            'http': 'socks5://127.0.0.1:1080',
-            'https': 'socks5://127.0.0.1:1080'
-        }
-        try:
-            r = requests.get(TEST_URL, proxies=proxies, timeout=TIMEOUT)
-            ip = r.json().get('ip', '')
-            # Если IP получен и не равен нашему реальному IP – считаем успехом
-            if ip and ip != get_my_ip():
-                return True
-        except:
-            return False
-        finally:
-            # Убиваем процесс
-            if proc:
-                proc.terminate()
-                proc.wait(timeout=2)
-    except Exception:
+        time.sleep(1.2)
+        proxies = {'http': 'socks5://127.0.0.1:1080', 'https': 'socks5://127.0.0.1:1080'}
+        r = requests.get(TEST_URL, proxies=proxies, timeout=XRAY_TIMEOUT)
+        ip = r.json().get('ip', '')
+        real_ip = get_my_ip()
+        if ip and ip != real_ip:
+            return True
+        else:
+            if not ip:
+                print("  [Xray] Не удалось получить IP через прокси")
+            else:
+                print(f"  [Xray] IP через прокси {ip} совпадает с реальным {real_ip}?")
+    except Exception as e:
+        print(f"  [Xray] Ошибка: {e}")
         return False
     finally:
-        # Удаляем конфиг
+        if proc:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except:
+                proc.kill()
         try:
             os.unlink(config_path)
         except:
             pass
-        if proc and proc.poll() is None:
-            proc.kill()
-            proc.wait()
     return False
 
+# ------------------ Загрузка ссылок ------------------
 def fetch_links_from_url(url: str) -> List[str]:
     req = urllib.request.Request(url, headers={'User-Agent': USER_AGENT})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             content = resp.read().decode('utf-8', errors='ignore')
-            lines = content.splitlines()
-            return [line.strip() for line in lines if line.strip().startswith('vless://')]
+            return [line.strip() for line in content.splitlines() if line.strip().startswith('vless://')]
     except Exception as e:
         print(f"Ошибка загрузки {url}: {e}")
         return []
 
 def fetch_links_from_sources(urls: List[str]) -> List[str]:
     for url in urls:
-        print(f"Пытаемся загрузить {url}")
+        print(f"Загрузка {url} ...")
         links = fetch_links_from_url(url)
         if links:
-            print(f"Загружено {len(links)} ссылок")
+            print(f"Получено {len(links)} ссылок")
             return links
     return []
 
-def get_working_links(all_links: List[str], target: int = TARGET_COUNT) -> List[str]:
-    """
-    Последовательно проверяет ссылки, начиная с немецких.
-    Возвращает список рабочих ссылок (до target).
-    """
-    # Разделяем на немецкие и остальные
-    german = []
-    other = []
+# ------------------ Основная логика ------------------
+def get_working_links(all_links: List[str]) -> List[str]:
+    # Этап 1: TCP фильтр
+    tcp_passed_german = []
+    tcp_passed_other = []
+    print("Этап 1: TCP-проверка (быстрая)...")
     for link in all_links:
-        if is_german(link):
-            german.append(link)
-        else:
-            other.append(link)
-
-    working = []
-    # Сначала проверяем немецкие
-    for link in german:
-        if len(working) >= target:
-            break
-        print(f"Проверка немецкого #{len(working)+1}...")
-        if test_vless_link(link):
-            working.append(link)
-            print(f"  ✅ Рабочий немецкий ({len(working)}/{target})")
-        else:
-            print("  ❌ Не работает")
-        time.sleep(DELAY)
-
-    # Если не хватает, проверяем остальные
-    if len(working) < target:
-        needed = target - len(working)
-        for link in other:
-            if len(working) >= target:
-                break
-            print(f"Проверка другого региона #{len(working)+1}...")
-            if test_vless_link(link):
-                working.append(link)
-                print(f"  ✅ Рабочий другой ({len(working)}/{target})")
+        if is_vless_tcp_alive(link):
+            if is_german(link):
+                tcp_passed_german.append(link)
             else:
-                print("  ❌ Не работает")
-            time.sleep(DELAY)
+                tcp_passed_other.append(link)
+        time.sleep(DELAY_BETWEEN)
+    print(f"TCP-проверка: немецких {len(tcp_passed_german)}, других {len(tcp_passed_other)}")
 
-    print(f"Итоговое количество рабочих ключей: {len(working)}")
-    return working
+    # Этап 2: Xray точная проверка
+    working = []
+    print("Этап 2: Xray-проверка (точная)...")
+    for link in tcp_passed_german:
+        if len(working) >= TARGET_COUNT:
+            break
+        print(f"  Проверка немецкого #{len(working)+1} ...", end=' ', flush=True)
+        if test_vless_xray(link):
+            working.append(link)
+            print("✅")
+        else:
+            print("❌")
+        time.sleep(DELAY_BETWEEN_XRAY)
+
+    if len(working) < TARGET_COUNT:
+        for link in tcp_passed_other:
+            if len(working) >= TARGET_COUNT:
+                break
+            print(f"  Проверка другого региона #{len(working)+1} ...", end=' ', flush=True)
+            if test_vless_xray(link):
+                working.append(link)
+                print("✅")
+            else:
+                print("❌")
+            time.sleep(DELAY_BETWEEN_XRAY)
+
+    print(f"Найдено Xray-рабочих ключей: {len(working)}")
+    if working:
+        return working
+    else:
+        # Если Xray не нашёл ни одного, используем TCP-проверенные (хотя бы что-то)
+        print("ВНИМАНИЕ: Xray не нашёл рабочих ключей. Использую TCP-проверенные как запасной вариант.")
+        fallback = tcp_passed_german + tcp_passed_other
+        return fallback[:TARGET_COUNT]
 
 def save_subscription(links: List[str], txt_path: str, b64_path: str):
     with open(txt_path, 'w', encoding='utf-8') as f:
@@ -291,15 +266,17 @@ def save_subscription(links: List[str], txt_path: str, b64_path: str):
     print(f"Сохранено: {txt_path} ({len(links)} строк), {b64_path}")
 
 def main():
-    print("=== Генератор подписки с реальной проверкой VLESS (Xray) ===")
+    print("=== Генератор подписки VLESS (с диагностикой и запасным вариантом) ===")
+    real_ip = get_my_ip()
+    print(f"Ваш реальный IP: {real_ip}")
     all_links = fetch_links_from_sources(SOURCE_URLS)
     if not all_links:
         print("Не удалось загрузить ссылки. Завершение.")
         return
 
-    working = get_working_links(all_links, TARGET_COUNT)
+    working = get_working_links(all_links)
     if not working:
-        print("Не найден ни один рабочий ключ. Сохраняем пустой список.")
+        print("Не найден ни один рабочий ключ (даже TCP). Сохраняем пустой список.")
     save_subscription(working, "sub_de.txt", "sub_de_b64.txt")
     print("Готово!")
 
