@@ -1,97 +1,124 @@
 import urllib.request
-import urllib.parse
 import base64
 import re
+import socket
+import time
+from typing import List, Tuple
 
+# ------------------ Конфигурация ------------------
 SOURCE_URL = "https://raw.githack.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-all.txt"
-MAX_SERVERS = 30
+TARGET_COUNT = 30
+TIMEOUT = 3  # секунды на TCP-проверку
+DELAY = 0.2  # задержка между проверками, чтобы не банили
+GERMAN_TAGS = ["DE", "Germany", "Frankfurt", "de", "germany", "frankfurt"]  # регистронезависимые
 
-def fetch_vless_links():
-    links = []
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-    
+# ------------------ Вспомогательные функции ------------------
+def is_german(link: str) -> bool:
+    """Проверяет, содержит ли ссылка признаки немецкого сервера."""
+    link_lower = link.lower()
+    return any(tag.lower() in link_lower for tag in GERMAN_TAGS)
+
+def extract_host_port(link: str) -> Tuple[str, int]:
+    """
+    Извлекает хост и порт из vless-ссылки.
+    Формат: vless://UUID@HOST:PORT?params...
+    Возвращает (host, port) или (None, None) при ошибке.
+    """
+    match = re.search(r'vless://[^@]+@([^:]+):(\d+)', link)
+    if match:
+        return match.group(1), int(match.group(2))
+    return None, None
+
+def is_port_open(host: str, port: int, timeout: float = TIMEOUT) -> bool:
+    """Проверяет, открыт ли TCP-порт на указанном хосте."""
     try:
-        req = urllib.request.Request(SOURCE_URL, headers=headers)
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            content = resp.read().decode('utf-8', errors='ignore').strip()
-            
-            # Если вся подписка зашифрована в Base64
-            try:
-                decoded = base64.b64decode(content).decode('utf-8', errors='ignore')
-                if "vless://" in decoded:
-                    content = decoded
-            except Exception:
-                pass
-            
-            for line in content.splitlines():
-                line = line.strip()
-                if line.startswith("vless://"):
-                    links.append(line)
-                    
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+def is_vless_alive(link: str) -> bool:
+    """Проверяет работоспособность VLESS-сервера через TCP-соединение."""
+    host, port = extract_host_port(link)
+    if host is None or port is None:
+        return False
+    return is_port_open(host, port)
+
+def fetch_links_from_url(url: str) -> List[str]:
+    """Загружает данные по URL и возвращает список строк, начинающихся с vless://."""
+    try:
+        with urllib.request.urlopen(url, timeout=10) as response:
+            content = response.read().decode('utf-8', errors='ignore')
+            lines = content.splitlines()
+            return [line.strip() for line in lines if line.strip().startswith('vless://')]
     except Exception as e:
         print(f"Ошибка загрузки источника: {e}")
-        
-    return links
+        return []
 
-def is_germany(link):
-    """Проверка на Германию по тегу в конце VLESS ссылки"""
-    tag = link.split("#")[-1] if "#" in link else ""
-    tag_decoded = urllib.parse.unquote(tag)
-    
-    # Ключевые слова для поиска немецких серверов
-    pattern = r'(🇩🇪|DE\b|Germany|Германия|Frankfurt|Nuremberg|Falkenstein|Hessen|Berlin)'
-    if re.search(pattern, tag_decoded, re.IGNORECASE):
-        return True
-        
-    return False
+def get_working_links(all_links: List[str], target: int = TARGET_COUNT) -> List[str]:
+    """
+    Возвращает список рабочих ссылок длиной до target.
+    Сначала собирает все немецкие рабочие, потом добивает другими рабочими.
+    """
+    german_working = []
+    other_working = []
 
+    print(f"Всего найдено ссылок: {len(all_links)}")
+    for i, link in enumerate(all_links):
+        # Проверяем только если ещё не набрали нужное количество
+        if len(german_working) >= target:
+            break
+        # Определяем немецкий ли
+        is_de = is_german(link)
+        # Проверяем работоспособность
+        if is_vless_alive(link):
+            if is_de:
+                german_working.append(link)
+                print(f"✓ Найден рабочий немецкий #{len(german_working)}")
+            else:
+                other_working.append(link)
+                print(f"✓ Найден рабочий другой регион (всего {len(other_working)})")
+        time.sleep(DELAY)  # пауза, чтобы не перегружать серверы
+
+    # Формируем финальный список
+    result = german_working[:target]
+    if len(result) < target:
+        needed = target - len(result)
+        result.extend(other_working[:needed])
+        print(f"Добавлено {len(other_working[:needed])} серверов из других регионов")
+
+    print(f"Итоговое количество ключей: {len(result)}")
+    return result
+
+def save_subscription(links: List[str], txt_path: str, b64_path: str):
+    """Сохраняет список ссылок в два файла: plain text и Base64."""
+    # Обычный текст (каждая ссылка с новой строки)
+    with open(txt_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(links))
+
+    # Base64 (строки, объединённые через \n, затем кодировка)
+    combined = '\n'.join(links)
+    b64_bytes = base64.b64encode(combined.encode('utf-8'))
+    with open(b64_path, 'wb') as f:
+        f.write(b64_bytes)
+
+    print(f"Сохранено: {txt_path} ({len(links)} строк), {b64_path}")
+
+# ------------------ Основная функция ------------------
 def main():
-    print("Скачиваем полную базу CIDR-RU...")
-    all_vless = fetch_vless_links()
-    print(f"Найдено VLESS конфигураций: {len(all_vless)}")
-
-    if not all_vless:
-        print("❌ Не удалось спарсить VLESS ссылки.")
+    print("=== Генератор подписки VLESS (рабочие ключи) ===")
+    # 1. Загрузка ссылок
+    all_links = fetch_links_from_url(SOURCE_URL)
+    if not all_links:
+        print("Не удалось получить ссылки. Завершение.")
         return
 
-    de_servers = []
-    other_servers = []
-    seen = set()
+    # 2. Отбор рабочих
+    working_links = get_working_links(all_links, TARGET_COUNT)
 
-    for link in all_vless:
-        if link in seen:
-            continue
-        seen.add(link)
-
-        if is_germany(link):
-            de_servers.append(link)
-        else:
-            other_servers.append(link)
-
-    print(f"Из них немецких серверов: {len(de_servers)}")
-
-    # Берем немецкие серверы (до 30 штук)
-    final_list = de_servers[:MAX_SERVERS]
-    
-    # Если немецких серверов меньше 30, добираем из общего списка
-    if len(final_list) < MAX_SERVERS:
-        needed = MAX_SERVERS - len(final_list)
-        print(f"Добираем {needed} резервных серверов из общего списка...")
-        final_list.extend(other_servers[:needed])
-
-    print(f"Итого серверов записано: {len(final_list)}")
-
-    # 1. Сохраняем текстовый список (sub_de.txt)
-    plain_text = "\n".join(final_list)
-    with open("sub_de.txt", "w", encoding="utf-8") as f:
-        f.write(plain_text)
-
-    # 2. Сохраняем Base64 подписку (sub_de_b64.txt)
-    b64_text = base64.b64encode(plain_text.encode('utf-8')).decode('utf-8')
-    with open("sub_de_b64.txt", "w", encoding="utf-8") as f:
-        f.write(b64_text)
-
-    print("✅ Успешно! Файлы подписки обновлены.")
+    # 3. Сохранение
+    save_subscription(working_links, "sub_de.txt", "sub_de_b64.txt")
+    print("Готово!")
 
 if __name__ == "__main__":
     main()
