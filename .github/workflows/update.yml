@@ -1,86 +1,53 @@
-:::writing{variant="document" id="41763"}
 name: Update VLESS Subscription
 
 on:
-  workflow_dispatch:
+workflow_dispatch:
 
-  schedule:
-    - cron: "0 */6 * * *"
+schedule:
+- cron: "0 */6 * * *"
 
-  push:
-    branches:
-      - main
+push:
+branches:
+- main
 
 permissions:
-  contents: write
+contents: write
 
 jobs:
-  update:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+update:
+runs-on: ubuntu-latest
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+steps:
+  - name: Checkout repository
+    uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+  - name: Setup Python
+    uses: actions/setup-python@v5
+    with:
+      python-version: "3.12"
 
-      - name: Generate subscription
-        run: python generate_sub.py
+  - name: Generate subscription
+    run: python generate_sub.py
 
-      - name: Check generated files
-        run: |
-          echo "===================================="
-          echo "Generated files"
-          echo "===================================="
+  - name: Check generated files
+    run: |
+      echo "Generated files:"
+      ls -lh sub_de.txt sub_de_b64.txt
 
-          ls -lh \
-            sub_de.txt \
-            sub_de_b64.txt \
-            servers_report.json
+      echo ""
+      echo "VLESS servers:"
+      grep -c "^vless://" sub_de.txt || true
 
-          echo
-          echo "Servers in subscription:"
-          grep -c '^vless://' sub_de.txt || true
+  - name: Commit changes
+    run: |
+      git config user.name "github-actions[bot]"
+      git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          echo
-          echo "Top servers:"
-          echo "===================================="
+      git add sub_de.txt sub_de_b64.txt
 
-          python - <<'PY'
-          import json
-
-          with open("servers_report.json", encoding="utf-8") as f:
-              data = json.load(f)
-
-          for item in data:
-              print(
-                  f"{item['rank']:02d}. "
-                  f"{item['server']} -> "
-                  f"{item['exit_ip']} "
-                  f"{item['country_code']} "
-                  f"{item['city']} "
-                  f"score={item['score']}"
-              )
-          PY
-
-      - name: Commit updated subscription
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add \
-            sub_de.txt \
-            sub_de_b64.txt \
-            servers_report.json
-
-          if git diff --cached --quiet; then
-            echo "No changes."
-          else
-            git commit -m "Update VLESS subscription"
-            git push
-          fi
-:::
+      if git diff --cached --quiet; then
+        echo "No changes to commit."
+      else
+        git commit -m "Update VLESS subscription"
+        git push
+      fi
