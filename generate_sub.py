@@ -1,12 +1,13 @@
 ```python
 import base64
+import ipaddress
 import json
 import os
 import shutil
 import socket
+import ssl
 import subprocess
 import tempfile
-import threading
 import time
 import urllib.parse
 import urllib.request
@@ -14,56 +15,29 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
-# ============================================================
-# НАСТРОЙКИ
-# ============================================================
-
 SOURCE_URL = (
     "https://raw.githack.com/igareck/"
     "vpn-configs-for-russia/main/WHITE-CIDR-RU-all.txt"
 )
 
 MAX_SERVERS = 30
-
-# Сколько серверов одновременно проверять.
-# Для GitHub Actions лучше не ставить слишком много.
 MAX_WORKERS = 5
-
-# Начальный диапазон локальных SOCKS-портов.
-LOCAL_PORT_START = 20000
-
-# Таймауты
-TCP_TIMEOUT = 4
-XRAY_START_TIMEOUT = 6
-EXIT_IP_TIMEOUT = 10
-
-# Только реальные немецкие EXIT IP.
-GERMANY_ONLY = True
-
-# Если немецких серверов меньше MAX_SERVERS,
-# добирать серверами других стран?
-FILL_WITH_OTHER_COUNTRIES = False
-
-# Сколько раз проверить каждый сервер.
-# 1 = быстрее.
-# 2 = надёжнее.
 CHECK_ATTEMPTS = 2
 
-# Версия Xray.
-# Если None, берём latest release.
-XRAY_VERSION = None
+XRAY_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    ".xray"
+)
+
+LOCAL_PORT_START = 20000
+
+TCP_TIMEOUT = 5
+XRAY_START_TIMEOUT = 8
+PROXY_TIMEOUT = 15
 
 
-# ============================================================
-# GLOBAL
-# ============================================================
-
-print_lock = threading.Lock()
-
-
-def log(message):
-    with print_lock:
-        print(message, flush=True)
+def log(text):
+    print(text, flush=True)
 
 
 # ============================================================
@@ -89,12 +63,12 @@ def http_get(url, timeout=30, headers=None):
 
 
 # ============================================================
-# ЗАГРУЗКА VLESS
+# DOWNLOAD VLESS DATABASE
 # ============================================================
 
 def fetch_vless_links():
 
-    log("📥 Загружаем VLESS-базу...")
+    log("📥 Загружаем базу VLESS...")
 
     try:
 
@@ -102,10 +76,7 @@ def fetch_vless_links():
             SOURCE_URL,
             timeout=30,
             headers={
-                "User-Agent": (
-                    "Mozilla/5.0 "
-                    "VLESS-Checker/1.0"
-                )
+                "User-Agent": "Mozilla/5.0"
             }
         )
 
@@ -116,29 +87,28 @@ def fetch_vless_links():
 
     except Exception as e:
 
-        log(f"❌ Ошибка загрузки базы: {e}")
+        log(f"❌ Ошибка загрузки: {e}")
         return []
 
     # --------------------------------------------------------
-    # Попытка Base64
+    # Base64 subscription
     # --------------------------------------------------------
 
     try:
 
-        normalized = content.replace(
-            "\n",
-            ""
-        ).replace(
-            "\r",
-            ""
+        clean = (
+            content
+            .replace("\n", "")
+            .replace("\r", "")
+            .replace(" ", "")
         )
 
-        normalized += "=" * (
-            (-len(normalized)) % 4
+        clean += "=" * (
+            (-len(clean)) % 4
         )
 
         decoded = base64.b64decode(
-            normalized,
+            clean,
             validate=False
         ).decode(
             "utf-8",
@@ -147,7 +117,6 @@ def fetch_vless_links():
 
         if "vless://" in decoded:
             content = decoded
-            log("🔐 Обнаружена Base64-подписка")
 
     except Exception:
         pass
@@ -161,13 +130,11 @@ def fetch_vless_links():
         if line.startswith("vless://"):
             links.append(line)
 
-    # Удаляем дубликаты
-    links = list(
-        dict.fromkeys(links)
-    )
+    links = list(dict.fromkeys(links))
 
     log(
-        f"📊 Уникальных VLESS: {len(links)}"
+        f"📊 Найдено уникальных VLESS: "
+        f"{len(links)}"
     )
 
     return links
@@ -186,11 +153,13 @@ def parse_vless(link):
         if parsed.scheme.lower() != "vless":
             return None
 
-        uuid = parsed.username
-        host = parsed.hostname
-        port = parsed.port
+        if not parsed.username:
+            return None
 
-        if not uuid or not host or not port:
+        if not parsed.hostname:
+            return None
+
+        if not parsed.port:
             return None
 
         params = urllib.parse.parse_qs(
@@ -200,12 +169,12 @@ def parse_vless(link):
 
         def get(name, default=""):
 
-            value = params.get(
-                name,
-                [default]
-            )
+            values = params.get(name)
 
-            return value[0] if value else default
+            if not values:
+                return default
+
+            return values[0]
 
         tag = ""
 
@@ -217,9 +186,9 @@ def parse_vless(link):
 
         return {
             "link": link,
-            "uuid": uuid,
-            "host": host,
-            "port": port,
+            "uuid": parsed.username,
+            "host": parsed.hostname,
+            "port": parsed.port,
 
             "type": get(
                 "type",
@@ -231,37 +200,16 @@ def parse_vless(link):
                 "none"
             ).lower(),
 
-            "sni": get(
-                "sni"
-            ),
+            "sni": get("sni"),
+            "fp": get("fp"),
+            "pbk": get("pbk"),
+            "sid": get("sid"),
+            "flow": get("flow"),
+            "alpn": get("alpn"),
 
-            "fp": get(
-                "fp"
-            ),
+            "path": get("path"),
 
-            "pbk": get(
-                "pbk"
-            ),
-
-            "sid": get(
-                "sid"
-            ),
-
-            "flow": get(
-                "flow"
-            ),
-
-            "alpn": get(
-                "alpn"
-            ),
-
-            "path": get(
-                "path"
-            ),
-
-            "host_header": get(
-                "host"
-            ),
+            "host_header": get("host"),
 
             "service_name": get(
                 "serviceName"
@@ -271,9 +219,7 @@ def parse_vless(link):
                 "authority"
             ),
 
-            "mode": get(
-                "mode"
-            ),
+            "mode": get("mode"),
 
             "header_type": get(
                 "headerType"
@@ -291,87 +237,68 @@ def parse_vless(link):
 # XRAY
 # ============================================================
 
-def get_xray_path():
+def get_xray():
 
-    local = os.path.join(
-        os.path.dirname(
-            os.path.abspath(__file__)
-        ),
+    os.makedirs(
+        XRAY_DIR,
+        exist_ok=True
+    )
+
+    xray_path = os.path.join(
+        XRAY_DIR,
         "xray"
     )
 
-    if os.path.isfile(local):
-        os.chmod(local, 0o755)
-        return local
+    if os.path.isfile(xray_path):
 
-    return download_xray(local)
-
-
-def download_xray(output_path):
-
-    log("📦 Xray не найден. Скачиваем Linux x64...")
-
-    if XRAY_VERSION:
-
-        version = XRAY_VERSION
-
-        if not version.startswith("v"):
-            version = "v" + version
-
-        url = (
-            "https://github.com/XTLS/Xray-core/"
-            f"releases/download/{version}/"
-            "Xray-linux-64.zip"
+        os.chmod(
+            xray_path,
+            0o755
         )
 
-    else:
+        return xray_path
 
-        api_url = (
-            "https://api.github.com/repos/"
-            "XTLS/Xray-core/releases/latest"
+    log("📦 Xray не найден. Скачиваем...")
+
+    api_url = (
+        "https://api.github.com/repos/"
+        "XTLS/Xray-core/releases/latest"
+    )
+
+    try:
+
+        data = http_get(
+            api_url,
+            timeout=30,
+            headers={
+                "User-Agent":
+                    "VLESS-Checker"
+            }
         )
 
-        try:
+        release = json.loads(
+            data.decode("utf-8")
+        )
 
-            data = http_get(
-                api_url,
-                timeout=30,
-                headers={
-                    "User-Agent": "VLESS-Checker/1.0",
-                    "Accept": (
-                        "application/vnd.github+json"
-                    )
-                }
-            )
+        version = release["tag_name"]
 
-            release = json.loads(
-                data.decode("utf-8")
-            )
+    except Exception as e:
 
-            version = release["tag_name"]
+        log(
+            f"❌ Не удалось получить версию Xray: {e}"
+        )
 
-            url = (
-                "https://github.com/XTLS/Xray-core/"
-                f"releases/download/{version}/"
-                "Xray-linux-64.zip"
-            )
+        return None
 
-        except Exception as e:
-
-            log(
-                f"❌ Не удалось получить "
-                f"последнюю версию Xray: {e}"
-            )
-
-            return None
-
-    log(
-        f"⬇️ Скачиваем Xray {version}..."
+    url = (
+        "https://github.com/XTLS/Xray-core/"
+        f"releases/download/{version}/"
+        "Xray-linux-64.zip"
     )
 
     zip_path = os.path.join(
-        tempfile.gettempdir(),
-        "xray-linux-64.zip"
+        XRAY_DIR,
+        "xray.zip"
     )
 
     try:
@@ -380,7 +307,8 @@ def download_xray(output_path):
             url,
             timeout=120,
             headers={
-                "User-Agent": "VLESS-Checker/1.0"
+                "User-Agent":
+                    "VLESS-Checker"
             }
         )
 
@@ -391,47 +319,36 @@ def download_xray(output_path):
 
             f.write(data)
 
-    except Exception as e:
-
-        log(
-            f"❌ Ошибка скачивания Xray: {e}"
-        )
-
-        return None
-
-    try:
-
         with zipfile.ZipFile(
             zip_path,
             "r"
         ) as archive:
 
+            names = archive.namelist()
+
             xray_member = None
 
-            for name in archive.namelist():
-
-                if name.endswith("/xray"):
-                    xray_member = name
-                    break
+            for name in names:
 
                 if name == "xray":
                     xray_member = name
                     break
 
+                if name.endswith("/xray"):
+                    xray_member = name
+                    break
+
             if not xray_member:
-
-                log(
-                    "❌ xray отсутствует в архиве"
+                raise RuntimeError(
+                    "xray отсутствует в архиве"
                 )
-
-                return None
 
             with archive.open(
                 xray_member
             ) as source:
 
                 with open(
-                    output_path,
+                    xray_path,
                     "wb"
                 ) as target:
 
@@ -441,20 +358,20 @@ def download_xray(output_path):
                     )
 
         os.chmod(
-            output_path,
+            xray_path,
             0o755
         )
 
         log(
-            f"✅ Xray установлен: {output_path}"
+            f"✅ Xray {version} установлен"
         )
 
-        return output_path
+        return xray_path
 
     except Exception as e:
 
         log(
-            f"❌ Ошибка распаковки Xray: {e}"
+            f"❌ Ошибка Xray: {e}"
         )
 
         return None
@@ -468,13 +385,10 @@ def download_xray(output_path):
 
 
 # ============================================================
-# XRAY CONFIG
+# BUILD XRAY CONFIG
 # ============================================================
 
-def build_xray_config(
-    server,
-    socks_port
-):
+def build_config(server, socks_port):
 
     network = server["type"]
     security = server["security"]
@@ -483,68 +397,58 @@ def build_xray_config(
         "network": network
     }
 
-    # --------------------------------------------------------
     # TCP
-    # --------------------------------------------------------
-
     if network == "tcp":
 
-        tcp_settings = {}
+        settings = {}
 
         if server["header_type"]:
 
-            tcp_settings["header"] = {
-                "type": server["header_type"]
+            settings["header"] = {
+                "type":
+                    server["header_type"]
             }
 
-        if tcp_settings:
-            stream["tcpSettings"] = tcp_settings
+        if settings:
+            stream["tcpSettings"] = settings
 
-    # --------------------------------------------------------
     # WebSocket
-    # --------------------------------------------------------
-
     elif network == "ws":
 
-        ws = {}
+        settings = {}
 
         if server["path"]:
-            ws["path"] = server["path"]
+            settings["path"] = server["path"]
 
         if server["host_header"]:
 
-            ws["headers"] = {
-                "Host": server["host_header"]
+            settings["headers"] = {
+                "Host":
+                    server["host_header"]
             }
 
-        stream["wsSettings"] = ws
+        stream["wsSettings"] = settings
 
-    # --------------------------------------------------------
     # gRPC
-    # --------------------------------------------------------
-
     elif network == "grpc":
 
-        grpc = {}
+        settings = {}
 
         if server["service_name"]:
 
-            grpc["serviceName"] = (
+            settings["serviceName"] = (
                 server["service_name"]
             )
 
         if server["authority"]:
 
-            grpc["authority"] = (
+            settings["authority"] = (
                 server["authority"]
             )
 
-        stream["grpcSettings"] = grpc
+        stream["grpcSettings"] = settings
 
-    # --------------------------------------------------------
     # HTTPUpgrade
-    # --------------------------------------------------------
-
     elif network == "httpupgrade":
 
         settings = {}
@@ -553,16 +457,15 @@ def build_xray_config(
             settings["path"] = server["path"]
 
         if server["host_header"]:
-            settings["host"] = server["host_header"]
+            settings["host"] = (
+                server["host_header"]
+            )
 
         stream[
             "httpupgradeSettings"
         ] = settings
 
-    # --------------------------------------------------------
-    # XHTTP
-    # --------------------------------------------------------
-
+    # XHTTP / SplitHTTP
     elif network in (
         "xhttp",
         "splithttp"
@@ -574,19 +477,20 @@ def build_xray_config(
             settings["path"] = server["path"]
 
         if server["host_header"]:
-            settings["host"] = server["host_header"]
+            settings["host"] = (
+                server["host_header"]
+            )
 
         if server["mode"]:
-            settings["mode"] = server["mode"]
+            settings["mode"] = (
+                server["mode"]
+            )
 
         stream[
             "xhttpSettings"
         ] = settings
 
-    # --------------------------------------------------------
     # TLS
-    # --------------------------------------------------------
-
     if security == "tls":
 
         tls = {
@@ -598,26 +502,26 @@ def build_xray_config(
             "allowInsecure": True
         }
 
-        if server["alpn"]:
-
-            tls["alpn"] = [
-                x.strip()
-                for x in server["alpn"].split(",")
-                if x.strip()
-            ]
-
         if server["fp"]:
+
             tls["fingerprint"] = (
                 server["fp"]
             )
 
+        if server["alpn"]:
+
+            tls["alpn"] = [
+                x.strip()
+                for x in
+                server["alpn"].split(",")
+                if x.strip()
+            ]
+
         stream["security"] = "tls"
+
         stream["tlsSettings"] = tls
 
-    # --------------------------------------------------------
     # REALITY
-    # --------------------------------------------------------
-
     elif security == "reality":
 
         reality = {
@@ -631,22 +535,24 @@ def build_xray_config(
                 or "chrome"
             ),
 
-            "publicKey": server["pbk"],
+            "publicKey":
+                server["pbk"],
 
-            "shortId": server["sid"]
+            "shortId":
+                server["sid"]
         }
 
         stream["security"] = "reality"
-        stream["realitySettings"] = reality
+
+        stream[
+            "realitySettings"
+        ] = reality
 
     else:
 
         stream["security"] = "none"
 
-    # --------------------------------------------------------
-    # USER
-    # --------------------------------------------------------
-
+    # VLESS user
     user = {
         "id": server["uuid"],
         "encryption": "none"
@@ -655,47 +561,17 @@ def build_xray_config(
     if server["flow"]:
         user["flow"] = server["flow"]
 
-    # --------------------------------------------------------
-    # OUTBOUND
-    # --------------------------------------------------------
-
-    outbound = {
-        "protocol": "vless",
-
-        "settings": {
-            "vnext": [
-                {
-                    "address": server["host"],
-                    "port": server["port"],
-                    "users": [
-                        user
-                    ]
-                }
-            ]
-        },
-
-        "streamSettings": stream,
-
-        "tag": "proxy"
-    }
-
-    # --------------------------------------------------------
-    # FINAL CONFIG
-    # --------------------------------------------------------
-
     return {
 
         "log": {
-            "loglevel": "warning"
+            "loglevel": "error"
         },
 
         "inbounds": [
 
             {
                 "listen": "127.0.0.1",
-
                 "port": socks_port,
-
                 "protocol": "socks",
 
                 "settings": {
@@ -703,30 +579,48 @@ def build_xray_config(
                     "udp": False
                 }
             }
-
         ],
 
         "outbounds": [
 
-            outbound,
+            {
+                "protocol": "vless",
+
+                "settings": {
+                    "vnext": [
+                        {
+                            "address":
+                                server["host"],
+
+                            "port":
+                                server["port"],
+
+                            "users": [
+                                user
+                            ]
+                        }
+                    ]
+                },
+
+                "streamSettings":
+                    stream,
+
+                "tag": "proxy"
+            },
 
             {
                 "protocol": "freedom",
                 "tag": "direct"
             }
-
         ]
     }
 
 
 # ============================================================
-# TCP PORT
+# TCP CHECK
 # ============================================================
 
-def tcp_check(
-    host,
-    port
-):
+def tcp_check(host, port):
 
     try:
 
@@ -734,6 +628,7 @@ def tcp_check(
             (host, port),
             timeout=TCP_TIMEOUT
         ):
+
             return True
 
     except Exception:
@@ -742,17 +637,14 @@ def tcp_check(
 
 
 # ============================================================
-# LOCAL PORT
+# WAIT SOCKS
 # ============================================================
 
-def wait_port(
-    port,
-    timeout
-):
+def wait_port(port):
 
     deadline = (
         time.time()
-        + timeout
+        + XRAY_START_TIMEOUT
     )
 
     while time.time() < deadline:
@@ -763,6 +655,7 @@ def wait_port(
                 ("127.0.0.1", port),
                 timeout=0.5
             ):
+
                 return True
 
         except Exception:
@@ -773,7 +666,7 @@ def wait_port(
 
 
 # ============================================================
-# ЗАПУСК XRAY
+# START XRAY
 # ============================================================
 
 def start_xray(
@@ -782,7 +675,6 @@ def start_xray(
     log_path
 ):
 
-    # Сначала проверяем JSON-конфигурацию
     test = subprocess.run(
         [
             xray_path,
@@ -802,10 +694,7 @@ def start_xray(
 
     if test.returncode != 0:
 
-        return None, (
-            "Config error: "
-            + test.stderr[-1000:]
-        )
+        return None
 
     log_file = open(
         log_path,
@@ -825,20 +714,17 @@ def start_xray(
         stderr=subprocess.STDOUT
     )
 
-    return (
-        process,
-        log_file
-    ), None
+    return process, log_file
 
 
 # ============================================================
-# SOCKS5
+# SOCKS5 CONNECTION
 # ============================================================
 
 def socks5_connect(
     proxy_port,
-    target_host,
-    target_port
+    host,
+    port
 ):
 
     sock = socket.create_connection(
@@ -846,11 +732,12 @@ def socks5_connect(
             "127.0.0.1",
             proxy_port
         ),
-        timeout=EXIT_IP_TIMEOUT
+
+        timeout=PROXY_TIMEOUT
     )
 
     sock.settimeout(
-        EXIT_IP_TIMEOUT
+        PROXY_TIMEOUT
     )
 
     # Greeting
@@ -865,7 +752,7 @@ def socks5_connect(
         sock.close()
 
         raise RuntimeError(
-            "SOCKS5 handshake failed"
+            "SOCKS authentication failed"
         )
 
     # --------------------------------------------------------
@@ -876,13 +763,13 @@ def socks5_connect(
 
         ip = socket.inet_pton(
             socket.AF_INET,
-            target_host
+            host
         )
 
         request = (
             b"\x05\x01\x00\x01"
             + ip
-            + target_port.to_bytes(
+            + port.to_bytes(
                 2,
                 "big"
             )
@@ -890,7 +777,7 @@ def socks5_connect(
 
     except OSError:
 
-        hostname = target_host.encode(
+        hostname = host.encode(
             "idna"
         )
 
@@ -898,15 +785,13 @@ def socks5_connect(
             b"\x05\x01\x00\x03"
             + bytes([len(hostname)])
             + hostname
-            + target_port.to_bytes(
+            + port.to_bytes(
                 2,
                 "big"
             )
         )
 
-    sock.sendall(
-        request
-    )
+    sock.sendall(request)
 
     response = sock.recv(4)
 
@@ -915,7 +800,7 @@ def socks5_connect(
         sock.close()
 
         raise RuntimeError(
-            "Invalid SOCKS5 response"
+            "Invalid SOCKS response"
         )
 
     if response[1] != 0:
@@ -925,22 +810,20 @@ def socks5_connect(
         sock.close()
 
         raise RuntimeError(
-            f"SOCKS5 error {code}"
+            f"SOCKS connection failed: {code}"
         )
 
-    address_type = response[3]
-
-    if address_type == 1:
+    # Read bind address
+    if response[3] == 1:
 
         sock.recv(4)
 
-    elif address_type == 3:
+    elif response[3] == 3:
 
         length = sock.recv(1)[0]
-
         sock.recv(length)
 
-    elif address_type == 4:
+    elif response[3] == 4:
 
         sock.recv(16)
 
@@ -950,12 +833,10 @@ def socks5_connect(
 
 
 # ============================================================
-# HTTP ЧЕРЕЗ SOCKS
+# GET EXIT IP
 # ============================================================
 
-def get_exit_ip(
-    socks_port
-):
+def get_exit_ip(socks_port):
 
     sock = socks5_connect(
         socks_port,
@@ -963,13 +844,13 @@ def get_exit_ip(
         443
     )
 
-    # TLS
-    import ssl
-
     context = ssl.create_default_context()
 
     context.check_hostname = False
-    context.verify_mode = ssl.CERT_NONE
+
+    context.verify_mode = (
+        ssl.CERT_NONE
+    )
 
     tls = context.wrap_socket(
         sock,
@@ -979,18 +860,16 @@ def get_exit_ip(
     request = (
         "GET / HTTP/1.1\r\n"
         "Host: api.ipify.org\r\n"
-        "User-Agent: VLESS-Checker\r\n"
+        "User-Agent: Mozilla/5.0\r\n"
         "Connection: close\r\n"
         "\r\n"
     ).encode()
 
-    tls.sendall(
-        request
-    )
+    tls.sendall(request)
 
     data = b""
 
-    while len(data) < 16384:
+    while True:
 
         chunk = tls.recv(4096)
 
@@ -999,13 +878,10 @@ def get_exit_ip(
 
         data += chunk
 
+        if len(data) > 16384:
+            break
+
     tls.close()
-
-    if b"\r\n\r\n" not in data:
-
-        raise RuntimeError(
-            "Invalid HTTP response"
-        )
 
     body = data.split(
         b"\r\n\r\n",
@@ -1015,11 +891,7 @@ def get_exit_ip(
         errors="ignore"
     ).strip()
 
-    # Иногда ответ содержит несколько строк.
     ip = body.split()[0]
-
-    # Проверяем, что это действительно IP
-    import ipaddress
 
     ipaddress.ip_address(ip)
 
@@ -1030,21 +902,19 @@ def get_exit_ip(
 # GEO IP
 # ============================================================
 
-def geo_ip(ip):
-
-    url = (
-        "https://ipwho.is/"
-        + urllib.parse.quote(ip)
-    )
+def get_geo(ip):
 
     try:
 
         data = http_get(
-            url,
+            "https://ipwho.is/"
+            + urllib.parse.quote(ip),
+
             timeout=10,
+
             headers={
                 "User-Agent":
-                    "VLESS-Checker/1.0"
+                    "Mozilla/5.0"
             }
         )
 
@@ -1055,29 +925,35 @@ def geo_ip(ip):
             )
         )
 
+        connection = result.get(
+            "connection",
+            {}
+        )
+
         return {
-            "country": result.get(
-                "country",
-                ""
-            ),
+            "country":
+                result.get(
+                    "country",
+                    ""
+                ),
 
-            "country_code": result.get(
-                "country_code",
-                ""
-            ).upper(),
+            "country_code":
+                result.get(
+                    "country_code",
+                    ""
+                ).upper(),
 
-            "city": result.get(
-                "city",
-                ""
-            ),
+            "city":
+                result.get(
+                    "city",
+                    ""
+                ),
 
-            "org": result.get(
-                "connection",
-                {}
-            ).get(
-                "org",
-                ""
-            )
+            "org":
+                connection.get(
+                    "org",
+                    ""
+                )
         }
 
     except Exception:
@@ -1091,7 +967,7 @@ def geo_ip(ip):
 
 
 # ============================================================
-# ОДИН ТЕСТ
+# CHECK ONE SERVER
 # ============================================================
 
 def check_server(
@@ -1101,7 +977,7 @@ def check_server(
 ):
 
     # --------------------------------------------------------
-    # Быстрая проверка TCP
+    # TCP
     # --------------------------------------------------------
 
     if not tcp_check(
@@ -1109,21 +985,14 @@ def check_server(
         server["port"]
     ):
 
-        return {
-            **server,
-            "working": False,
-            "reason": "TCP unavailable"
-        }
-
-    last_error = ""
+        return None
 
     for attempt in range(
-        1,
-        CHECK_ATTEMPTS + 1
+        CHECK_ATTEMPTS
     ):
 
         work_dir = tempfile.mkdtemp(
-            prefix="vless_"
+            prefix="vless-check-"
         )
 
         process = None
@@ -1131,7 +1000,7 @@ def check_server(
 
         try:
 
-            config = build_xray_config(
+            config = build_config(
                 server,
                 socks_port
             )
@@ -1158,39 +1027,32 @@ def check_server(
                     ensure_ascii=False
                 )
 
-            started, error = start_xray(
+            started = start_xray(
                 xray_path,
                 config_path,
                 log_path
             )
 
             if not started:
-
-                last_error = error
                 continue
 
             process, log_file = started
 
             if not wait_port(
-                socks_port,
-                XRAY_START_TIMEOUT
+                socks_port
             ):
-
-                last_error = (
-                    "Xray SOCKS did not start"
-                )
 
                 continue
 
             # ------------------------------------------------
-            # Получаем реальный EXIT IP
+            # REAL EXIT IP
             # ------------------------------------------------
 
             exit_ip = get_exit_ip(
                 socks_port
             )
 
-            geo = geo_ip(
+            geo = get_geo(
                 exit_ip
             )
 
@@ -1198,38 +1060,51 @@ def check_server(
                 "country_code"
             ]
 
-            germany = (
+            is_germany = (
                 country_code == "DE"
             )
 
             # ------------------------------------------------
-            # Рейтинг
+            # SCORE
             # ------------------------------------------------
 
-            score = 100
+            score = 0
 
-            # Самый важный приоритет
+            # Реальная Германия
+            if is_germany:
+                score += 1000
+
+            # IP:443
+            try:
+
+                ipaddress.ip_address(
+                    server["host"]
+                )
+
+                server_is_ip = True
+
+            except ValueError:
+
+                server_is_ip = False
+
+            if server_is_ip:
+                score += 100
+
+            if server["port"] == 443:
+                score += 300
+
+            # Особый приоритет IP:443
             if (
-                server["host"].replace(
-                    ".",
-                    ""
-                ).isdigit()
+                server_is_ip
                 and server["port"] == 443
             ):
 
-                score += 300
+                score += 1000
 
-            # 443
-            if server["port"] == 443:
-                score += 100
-
-            # Германия
-            if germany:
-                score += 200
-
-            # Exit IP совпадает с адресом сервера
+            # Если EXIT IP совпадает с IP сервера
             if exit_ip == server["host"]:
-                score += 100
+
+                score += 150
 
             # TLS / Reality
             if server["security"] in (
@@ -1237,43 +1112,52 @@ def check_server(
                 "reality"
             ):
 
-                score += 30
+                score += 50
 
             return {
                 **server,
 
-                "working": True,
+                "exit_ip":
+                    exit_ip,
 
-                "exit_ip": exit_ip,
+                "country":
+                    geo["country"],
 
-                "country": geo["country"],
+                "country_code":
+                    country_code,
 
-                "country_code": country_code,
+                "city":
+                    geo["city"],
 
-                "city": geo["city"],
+                "org":
+                    geo["org"],
 
-                "org": geo["org"],
+                "score":
+                    score,
 
-                "exit_equals_server": (
-                    exit_ip == server["host"]
-                ),
+                "server_is_ip":
+                    server_is_ip,
 
-                "score": score,
-
-                "attempt": attempt
+                "working":
+                    True
             }
 
-        except Exception as e:
+        except Exception:
 
-            last_error = str(e)
+            pass
 
         finally:
 
             if process:
 
                 try:
+
                     process.terminate()
-                    process.wait(timeout=2)
+
+                    process.wait(
+                        timeout=2
+                    )
+
                 except Exception:
 
                     try:
@@ -1293,66 +1177,14 @@ def check_server(
                 ignore_errors=True
             )
 
-    return {
-        **server,
-        "working": False,
-        "reason": last_error
-    }
-
-
-# ============================================================
-# SORT
-# ============================================================
-
-def sort_servers(servers):
-
-    def is_ip(value):
-
-        try:
-            import ipaddress
-            ipaddress.ip_address(value)
-            return True
-        except Exception:
-            return False
-
-    def key(server):
-
-        ip_443 = (
-            is_ip(server["host"])
-            and server["port"] == 443
-        )
-
-        germany = (
-            server["country_code"]
-            == "DE"
-        )
-
-        exit_same = (
-            server["exit_equals_server"]
-        )
-
-        return (
-            germany,
-            ip_443,
-            exit_same,
-            server["port"] == 443,
-            server["score"]
-        )
-
-    return sorted(
-        servers,
-        key=key,
-        reverse=True
-    )
+    return None
 
 
 # ============================================================
 # SAVE
 # ============================================================
 
-def save_results(
-    servers
-):
+def save_files(servers):
 
     links = [
         server["link"]
@@ -1371,7 +1203,7 @@ def save_results(
 
         f.write(text)
 
-    encoded = base64.b64encode(
+    b64 = base64.b64encode(
         text.encode("utf-8")
     ).decode("ascii")
 
@@ -1381,11 +1213,7 @@ def save_results(
         encoding="utf-8"
     ) as f:
 
-        f.write(encoded)
-
-    # --------------------------------------------------------
-    # JSON report
-    # --------------------------------------------------------
+        f.write(b64)
 
     report = []
 
@@ -1395,53 +1223,32 @@ def save_results(
     ):
 
         report.append({
-
             "rank": index,
 
-            "server": (
+            "server":
                 f"{server['host']}:"
-                f"{server['port']}"
-            ),
+                f"{server['port']}",
 
-            "exit_ip": server.get(
-                "exit_ip",
-                ""
-            ),
+            "exit_ip":
+                server["exit_ip"],
 
-            "country": server.get(
-                "country",
-                ""
-            ),
+            "country":
+                server["country"],
 
-            "country_code": server.get(
-                "country_code",
-                ""
-            ),
+            "country_code":
+                server["country_code"],
 
-            "city": server.get(
-                "city",
-                ""
-            ),
+            "city":
+                server["city"],
 
-            "organization": server.get(
-                "org",
-                ""
-            ),
+            "organization":
+                server["org"],
 
-            "score": server.get(
-                "score",
-                0
-            ),
+            "score":
+                server["score"],
 
-            "exit_equals_server": server.get(
-                "exit_equals_server",
-                False
-            ),
-
-            "tag": server.get(
-                "tag",
-                ""
-            )
+            "tag":
+                server["tag"]
         })
 
     with open(
@@ -1457,12 +1264,6 @@ def save_results(
             indent=2
         )
 
-    log("")
-    log("💾 Файлы сохранены:")
-    log("   sub_de.txt")
-    log("   sub_de_b64.txt")
-    log("   servers_report.json")
-
 
 # ============================================================
 # MAIN
@@ -1471,7 +1272,7 @@ def save_results(
 def main():
 
     log("=" * 70)
-    log(" VLESS DE EXIT-IP CHECKER")
+    log(" VLESS SERVER CHECKER")
     log("=" * 70)
 
     # --------------------------------------------------------
@@ -1482,128 +1283,79 @@ def main():
 
     if not xray_path:
 
-        log(
-            "❌ Xray не удалось установить."
+        raise SystemExit(
+            "Xray не установлен"
         )
 
-        raise SystemExit(1)
-
     # --------------------------------------------------------
-    # VLESS
+    # Download
     # --------------------------------------------------------
 
     links = fetch_vless_links()
 
     if not links:
 
-        log(
-            "❌ VLESS-конфигурации не найдены."
+        raise SystemExit(
+            "VLESS ссылки не найдены"
         )
-
-        raise SystemExit(1)
 
     servers = []
 
     for link in links:
 
-        parsed = parse_vless(
+        server = parse_vless(
             link
         )
 
-        if parsed:
-            servers.append(parsed)
+        if server:
+            servers.append(
+                server
+            )
 
     log(
-        f"🔎 Корректных конфигураций: "
+        f"🔍 К проверке: "
         f"{len(servers)}"
     )
 
-    if not servers:
-
-        raise SystemExit(1)
-
     # --------------------------------------------------------
-    # IP:443 ставим на проверку первыми
+    # Сначала IP:443
     # --------------------------------------------------------
 
-    def priority(server):
+    def first_priority(server):
 
         try:
-
-            import ipaddress
-
-            is_server_ip = True
 
             ipaddress.ip_address(
                 server["host"]
             )
 
-        except Exception:
+            is_ip = True
 
-            is_server_ip = False
+        except ValueError:
+
+            is_ip = False
 
         return (
-            is_server_ip
-            and server["port"] == 443,
-
+            is_ip and server["port"] == 443,
             server["port"] == 443,
-
-            is_server_ip
+            is_ip
         )
 
     servers.sort(
-        key=priority,
+        key=first_priority,
         reverse=True
     )
 
     # --------------------------------------------------------
-    # Проверяем
+    # CHECK
     # --------------------------------------------------------
+
+    working = []
 
     log("")
     log(
-        f"⚡ Проверяем {len(servers)} "
-        f"конфигураций через Xray..."
+        "⚡ Проверяем реальные EXIT IP..."
     )
-
-    log(
-        f"   Параллельно: {MAX_WORKERS}"
-    )
-
-    log(
-        f"   Проверок на сервер: "
-        f"{CHECK_ATTEMPTS}"
-    )
-
-    results = []
-
-    # --------------------------------------------------------
-    # Уникальные локальные порты
-    # --------------------------------------------------------
-
-    jobs = []
-
-    for index, server in enumerate(
-        servers
-    ):
-
-        socks_port = (
-            LOCAL_PORT_START
-            + index
-        )
-
-        jobs.append(
-            (
-                server,
-                socks_port
-            )
-        )
-
-    # --------------------------------------------------------
-    # ThreadPool
-    # --------------------------------------------------------
-
-    completed = 0
 
     with ThreadPoolExecutor(
         max_workers=MAX_WORKERS
@@ -1611,7 +1363,14 @@ def main():
 
         futures = {}
 
-        for server, port in jobs:
+        for index, server in enumerate(
+            servers
+        ):
+
+            port = (
+                LOCAL_PORT_START
+                + index
+            )
 
             future = executor.submit(
                 check_server,
@@ -1622,11 +1381,13 @@ def main():
 
             futures[future] = server
 
+        done = 0
+
         for future in as_completed(
             futures
         ):
 
-            completed += 1
+            done += 1
 
             server = futures[future]
 
@@ -1634,213 +1395,165 @@ def main():
 
                 result = future.result()
 
-                if result["working"]:
+            except Exception:
 
-                    results.append(
-                        result
-                    )
+                result = None
 
-                    log(
-                        f"✅ "
-                        f"{completed}/"
-                        f"{len(jobs)} "
-                        f"{result['host']}:"
-                        f"{result['port']} "
-                        f"→ "
-                        f"{result['exit_ip']} "
-                        f"{result['country_code']} "
-                        f"score="
-                        f"{result['score']}"
-                    )
+            if result:
 
-                else:
-
-                    log(
-                        f"❌ "
-                        f"{completed}/"
-                        f"{len(jobs)} "
-                        f"{server['host']}:"
-                        f"{server['port']} "
-                        f"{result.get('reason', '')[:60]}"
-                    )
-
-            except Exception as e:
+                working.append(
+                    result
+                )
 
                 log(
-                    f"❌ Ошибка проверки "
-                    f"{server['host']}: "
-                    f"{e}"
+                    f"✅ {done}/"
+                    f"{len(servers)} "
+                    f"{result['host']}:"
+                    f"{result['port']} "
+                    f"→ "
+                    f"{result['exit_ip']} "
+                    f"{result['country_code']} "
+                    f"{result['city']}"
+                )
+
+            else:
+
+                log(
+                    f"❌ {done}/"
+                    f"{len(servers)} "
+                    f"{server['host']}:"
+                    f"{server['port']}"
                 )
 
     # --------------------------------------------------------
-    # Statistics
+    # Только Германия
     # --------------------------------------------------------
-
-    log("")
-    log("=" * 70)
 
     germany = [
-        x for x in results
-        if x["country_code"] == "DE"
+        server
+        for server in working
+        if server["country_code"] == "DE"
     ]
 
-    germany_ip443 = [
-        x for x in germany
-        if (
-            x["port"] == 443
-            and "." in x["host"]
-        )
-    ]
-
-    log(
-        f"🟢 Рабочих VLESS: "
-        f"{len(results)}"
-    )
-
-    log(
-        f"🇩🇪 Немецких EXIT IP: "
-        f"{len(germany)}"
-    )
-
-    log(
-        f"🔥 Германия + IP:443: "
-        f"{len(germany_ip443)}"
-    )
-
     # --------------------------------------------------------
-    # Sort
+    # Сортировка
+    #
+    # 1. Германия
+    # 2. IP:443
+    # 3. порт 443
+    # 4. реальный рабочий EXIT IP
     # --------------------------------------------------------
 
-    results = sort_servers(
-        results
+    germany.sort(
+        key=lambda server: (
+            (
+                server["server_is_ip"]
+                and server["port"] == 443
+            ),
+            server["port"] == 443,
+            server["score"]
+        ),
+        reverse=True
     )
 
-    # --------------------------------------------------------
-    # Germany filter
-    # --------------------------------------------------------
-
-    if GERMANY_ONLY:
-
-        selected = [
-            x for x in results
-            if x["country_code"] == "DE"
-        ]
-
-        if (
-            len(selected) < MAX_SERVERS
-            and FILL_WITH_OTHER_COUNTRIES
-        ):
-
-            selected_links = {
-                x["link"]
-                for x in selected
-            }
-
-            for server in results:
-
-                if (
-                    server["link"]
-                    not in selected_links
-                ):
-
-                    selected.append(
-                        server
-                    )
-
-                    if len(selected) >= MAX_SERVERS:
-                        break
-
-    else:
-
-        selected = results
-
-    selected = selected[
+    selected = germany[
         :MAX_SERVERS
     ]
 
     # --------------------------------------------------------
-    # TOP
+    # RESULT
     # --------------------------------------------------------
 
     log("")
     log("=" * 70)
     log(
-        f"🏆 TOP {len(selected)}"
+        f"🟢 Рабочих: {len(working)}"
+    )
+    log(
+        f"🇩🇪 Германия: {len(germany)}"
+    )
+    log(
+        f"🔥 Германия IP:443: "
+        f"{sum(
+            1
+            for x in germany
+            if (
+                x["server_is_ip"]
+                and x["port"] == 443
+            )
+        )}"
+    )
+    log(
+        f"🏆 В подписку: {len(selected)}"
     )
     log("=" * 70)
+
+    # --------------------------------------------------------
+    # TOP
+    # --------------------------------------------------------
 
     for index, server in enumerate(
         selected,
         1
     ):
 
-        ip443 = (
-            "." in server["host"]
-            and server["port"] == 443
-        )
-
-        marker = (
+        special = (
             "🔥"
-            if ip443
+            if (
+                server["server_is_ip"]
+                and server["port"] == 443
+            )
             else " "
         )
 
         log(
             f"{index:02d}. "
-            f"{marker} "
+            f"{special} "
             f"{server['host']}:"
             f"{server['port']} "
             f"→ "
             f"{server['exit_ip']} "
             f"🇩🇪 "
             f"{server['city']} "
-            f"[{server['score']}]"
+            f"score={server['score']}"
         )
 
     # --------------------------------------------------------
-    # Save
+    # SAVE
     # --------------------------------------------------------
 
-    if selected:
+    if not selected:
 
-        save_results(
-            selected
-        )
-
-    else:
-
-        log("")
         log(
-            "❌ Подходящих немецких "
-            "серверов не найдено."
+            "❌ Рабочих немецких серверов "
+            "не найдено."
         )
 
-        # Чтобы не оставить старую подписку
+        # Не оставляем старую подписку
         for filename in (
             "sub_de.txt",
-            "sub_de_b64.txt"
+            "sub_de_b64.txt",
+            "servers_report.json"
         ):
 
             try:
 
-                if os.path.exists(
-                    filename
-                ):
-                    os.remove(
-                        filename
-                    )
+                os.remove(filename)
 
-            except Exception:
+            except FileNotFoundError:
                 pass
 
-        # GitHub Actions должен видеть
-        # отсутствие результата как ошибку.
         raise SystemExit(2)
 
+    save_files(
+        selected
+    )
+
     log("")
-    log("=" * 70)
-    log("✅ Готово")
-    log("=" * 70)
+    log("✅ Подписка обновлена.")
+    log("   sub_de.txt")
+    log("   sub_de_b64.txt")
+    log("   servers_report.json")
 
 
 if __name__ == "__main__":
