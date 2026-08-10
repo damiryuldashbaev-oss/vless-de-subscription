@@ -1,53 +1,30 @@
-name: Update VLESS Subscription
+name: Auto Update DE Subscription
 
 on:
-workflow_dispatch:
-
-schedule:
-- cron: "0 */6 * * *"
-
-push:
-branches:
-- main
-
-permissions:
-contents: write
+  schedule:
+    - cron: '0 */6 * * *' # Автоматический запуск каждые 6 часов
+  workflow_dispatch: # Кнопка для ручного запуска в любое время
 
 jobs:
-update:
-runs-on: ubuntu-latest
+  build:
+    runs-on: ubuntu-latest
 
-steps:
-  - name: Checkout repository
-    uses: actions/checkout@v4
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-  - name: Setup Python
-    uses: actions/setup-python@v5
-    with:
-      python-version: "3.12"
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
 
-  - name: Generate subscription
-    run: python generate_sub.py
+      - name: Run generator script
+        run: python generate_sub.py
 
-  - name: Check generated files
-    run: |
-      echo "Generated files:"
-      ls -lh sub_de.txt sub_de_b64.txt
-
-      echo ""
-      echo "VLESS servers:"
-      grep -c "^vless://" sub_de.txt || true
-
-  - name: Commit changes
-    run: |
-      git config user.name "github-actions[bot]"
-      git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-      git add sub_de.txt sub_de_b64.txt
-
-      if git diff --cached --quiet; then
-        echo "No changes to commit."
-      else
-        git commit -m "Update VLESS subscription"
-        git push
-      fi
+      - name: Commit and push updated subscription files
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add sub_de.txt sub_de_b64.txt
+          git diff-index --quiet HEAD || git commit -m "Auto-update Germany VLESS list"
+          git push
