@@ -1,4 +1,4 @@
-```yaml
+:::writing{variant="document" id="41763"}
 name: Update VLESS Subscription
 
 on:
@@ -15,15 +15,11 @@ permissions:
   contents: write
 
 jobs:
-
   update:
-
     runs-on: ubuntu-latest
-
     timeout-minutes: 30
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -33,13 +29,12 @@ jobs:
           python-version: "3.12"
 
       - name: Generate subscription
-        run: |
-          python generate_sub.py
+        run: python generate_sub.py
 
-      - name: Check result
+      - name: Check generated files
         run: |
           echo "===================================="
-          echo "Generated files:"
+          echo "Generated files"
           echo "===================================="
 
           ls -lh \
@@ -49,21 +44,16 @@ jobs:
 
           echo
           echo "Servers in subscription:"
-
           grep -c '^vless://' sub_de.txt || true
 
           echo
-          echo "===================================="
           echo "Top servers:"
           echo "===================================="
 
           python - <<'PY'
           import json
 
-          with open(
-              "servers_report.json",
-              encoding="utf-8"
-          ) as f:
+          with open("servers_report.json", encoding="utf-8") as f:
               data = json.load(f)
 
           for item in data:
@@ -79,12 +69,8 @@ jobs:
 
       - name: Commit updated subscription
         run: |
-
-          git config user.name \
-            "github-actions[bot]"
-
-          git config user.email \
-            "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add \
             sub_de.txt \
@@ -92,15 +78,9 @@ jobs:
             servers_report.json
 
           if git diff --cached --quiet; then
-
             echo "No changes."
-
           else
-
-            git commit \
-              -m "Update VLESS subscription"
-
+            git commit -m "Update VLESS subscription"
             git push
-
           fi
-```
+:::
