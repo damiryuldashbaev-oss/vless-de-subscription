@@ -4,7 +4,7 @@ import base64
 import re
 
 SOURCE_URL = "https://raw.githack.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-all.txt"
-MAX_SERVERS = 15
+MAX_SERVERS = 30
 
 def fetch_vless_links():
     links = []
@@ -70,10 +70,10 @@ def main():
 
     print(f"Из них немецких серверов: {len(de_servers)}")
 
-    # Берем немецкие серверы (до 15 штук)
+    # Берем немецкие серверы (до 30 штук)
     final_list = de_servers[:MAX_SERVERS]
     
-    # Если немецких серверов меньше 15, добираем из общего списка
+    # Если немецких серверов меньше 30, добираем из общего списка
     if len(final_list) < MAX_SERVERS:
         needed = MAX_SERVERS - len(final_list)
         print(f"Добираем {needed} резервных серверов из общего списка...")
