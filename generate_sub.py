@@ -16,8 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 SOURCE_URL = (
-    "https://raw.githack.com/igareck/"
-    "vpn-configs-for-russia/main/WHITE-CIDR-RU-all.txt"
+    "https://raw.githack.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-all.txt"
 )
 
 MAX_SERVERS = 30
