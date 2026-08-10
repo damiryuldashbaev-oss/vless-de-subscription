@@ -1,14 +1,13 @@
-name: Auto Update DE Subscription
+name: Update VLESS Subscription
 
 on:
   schedule:
-    - cron: '0 */6 * * *' # Автоматический запуск каждые 6 часов
-  workflow_dispatch: # Кнопка для ручного запуска в любое время
+    - cron: '0 */6 * * *'   # каждые 6 часов
+  workflow_dispatch:        # ручной запуск
 
 jobs:
-  build:
+  update:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -16,15 +15,26 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          python-version: '3.11'
 
-      - name: Run generator script
+      - name: Install Xray-core
+        run: |
+          curl -L https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip -o xray.zip
+          unzip -o xray.zip -d xray
+          chmod +x xray/xray
+          sudo mv xray/xray /usr/local/bin/
+          xray version
+
+      - name: Install Python dependencies
+        run: pip install --upgrade requests
+
+      - name: Run generator
         run: python generate_sub.py
 
-      - name: Commit and push updated subscription files
+      - name: Commit and push changes
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git add sub_de.txt sub_de_b64.txt
-          git diff-index --quiet HEAD || git commit -m "Auto-update Germany VLESS list"
+          git diff --staged --quiet || git commit -m "Auto-update subscription [skip ci]"
           git push
