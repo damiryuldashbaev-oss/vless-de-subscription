@@ -1,3 +1,13 @@
+#!/usr/bin/env python3
+"""
+Генератор подписки с проверкой живых VLESS-серверов.
+Источник (основной): https://raw.githack.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-all.txt
+Резервный: https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-all.txt
+Отбирает до 30 рабочих серверов, сначала немецкие (DE/Germany/Frankfurt),
+при необходимости добивает рабочими из других регионов.
+Сохраняет результат в plain text и Base64.
+"""
+
 import urllib.request
 import base64
 import re
@@ -6,11 +16,15 @@ import time
 from typing import List, Tuple
 
 # ------------------ Конфигурация ------------------
-SOURCE_URL = "https://raw.githack.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-all.txt"
+SOURCE_URLS = [
+    "https://raw.githack.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-all.txt",
+    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-all.txt"
+]
 TARGET_COUNT = 30
 TIMEOUT = 3  # секунды на TCP-проверку
 DELAY = 0.2  # задержка между проверками, чтобы не банили
-GERMAN_TAGS = ["DE", "Germany", "Frankfurt", "de", "germany", "frankfurt"]  # регистронезависимые
+GERMAN_TAGS = ["DE", "Germany", "Frankfurt", "de", "germany", "frankfurt"]
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 # ------------------ Вспомогательные функции ------------------
 def is_german(link: str) -> bool:
@@ -45,15 +59,28 @@ def is_vless_alive(link: str) -> bool:
     return is_port_open(host, port)
 
 def fetch_links_from_url(url: str) -> List[str]:
-    """Загружает данные по URL и возвращает список строк, начинающихся с vless://."""
+    """Загружает данные по URL с заголовком User-Agent и возвращает список vless-строк."""
     try:
-        with urllib.request.urlopen(url, timeout=10) as response:
+        req = urllib.request.Request(url, headers={'User-Agent': USER_AGENT})
+        with urllib.request.urlopen(req, timeout=10) as response:
             content = response.read().decode('utf-8', errors='ignore')
             lines = content.splitlines()
             return [line.strip() for line in lines if line.strip().startswith('vless://')]
     except Exception as e:
-        print(f"Ошибка загрузки источника: {e}")
+        print(f"Ошибка загрузки {url}: {e}")
         return []
+
+def fetch_links_from_sources(urls: List[str]) -> List[str]:
+    """Пытается загрузить ссылки из списка URL, возвращает первый успешный результат."""
+    for url in urls:
+        print(f"Попытка загрузить: {url}")
+        links = fetch_links_from_url(url)
+        if links:
+            print(f"Загружено {len(links)} ссылок")
+            return links
+        else:
+            print(f"Не удалось загрузить с {url}, пробуем следующий...")
+    return []
 
 def get_working_links(all_links: List[str], target: int = TARGET_COUNT) -> List[str]:
     """
@@ -65,10 +92,10 @@ def get_working_links(all_links: List[str], target: int = TARGET_COUNT) -> List[
 
     print(f"Всего найдено ссылок: {len(all_links)}")
     for i, link in enumerate(all_links):
-        # Проверяем только если ещё не набрали нужное количество
+        # Останавливаемся, если уже набрали нужное количество немецких
         if len(german_working) >= target:
             break
-        # Определяем немецкий ли
+        # Проверяем принадлежность к Германии
         is_de = is_german(link)
         # Проверяем работоспособность
         if is_vless_alive(link):
@@ -78,7 +105,7 @@ def get_working_links(all_links: List[str], target: int = TARGET_COUNT) -> List[
             else:
                 other_working.append(link)
                 print(f"✓ Найден рабочий другой регион (всего {len(other_working)})")
-        time.sleep(DELAY)  # пауза, чтобы не перегружать серверы
+        time.sleep(DELAY)
 
     # Формируем финальный список
     result = german_working[:target]
@@ -92,7 +119,7 @@ def get_working_links(all_links: List[str], target: int = TARGET_COUNT) -> List[
 
 def save_subscription(links: List[str], txt_path: str, b64_path: str):
     """Сохраняет список ссылок в два файла: plain text и Base64."""
-    # Обычный текст (каждая ссылка с новой строки)
+    # Обычный текст
     with open(txt_path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(links))
 
@@ -108,9 +135,9 @@ def save_subscription(links: List[str], txt_path: str, b64_path: str):
 def main():
     print("=== Генератор подписки VLESS (рабочие ключи) ===")
     # 1. Загрузка ссылок
-    all_links = fetch_links_from_url(SOURCE_URL)
+    all_links = fetch_links_from_sources(SOURCE_URLS)
     if not all_links:
-        print("Не удалось получить ссылки. Завершение.")
+        print("Не удалось получить ссылки ни из одного источника. Завершение.")
         return
 
     # 2. Отбор рабочих
