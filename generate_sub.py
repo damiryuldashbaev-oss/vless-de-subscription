@@ -18,7 +18,7 @@ from typing import List, Tuple, Optional
 
 # ------------------ Конфигурация ------------------
 SOURCE_URLS = [
-    "https://raw.githack.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt"
+    "https://raw.githack.com/igareck/vpn-configs-for-russia/main/Vless-Reality-White-Lists-Rus-Mobile.txt"
 ]
 TARGET_COUNT = 30
 TCP_TIMEOUT = 1.5
