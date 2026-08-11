@@ -20,12 +20,12 @@ from typing import List, Tuple, Optional
 SOURCE_URLS = [
     "https://raw.githack.com/igareck/vpn-configs-for-russia/main/Vless-Reality-White-Lists-Rus-Mobile.txt"
 ]
-TARGET_COUNT = 30
+TARGET_COUNT = 15
 TCP_TIMEOUT = 1.5
 XRAY_TIMEOUT = 5
 DELAY_BETWEEN = 0.3
 DELAY_BETWEEN_XRAY = 0.5
-GERMAN_TAGS = ["DE", "Germany", "Frankfurt", "de", "germany", "frankfurt"]
+GERMAN_TAGS = ["DE", "Germany", "Frankfurt", "de", "germany", "frankfurt", "443"]
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 TEST_URL = "https://api.ipify.org?format=json"
 
