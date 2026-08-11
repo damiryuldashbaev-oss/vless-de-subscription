@@ -2,7 +2,7 @@ name: Update VLESS Subscription
 
 on:
   schedule:
-    - cron: '0 */2 * * *'   # каждые 2 часа
+    - cron: '0 */6 * * *'   # каждые 6 часов
   workflow_dispatch:        # ручной запуск
 
 jobs:
