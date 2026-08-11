@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Генератор подписки с двухэтапной проверкой и диагностикой.
-Выбирает только немецкие (DE) VLESS-серверы с портом 443.
-Если не найдено ни одного Xray-рабочего ключа, используем TCP-проверенные (как запасной вариант).
+Генератор подписки с двухэтапной проверкой.
+Выбирает только немецкие (Germany) VLESS-серверы с портом 443.
+Если не найдено ни одного Xray-рабочего ключа, используем TCP-проверенные (запасной вариант).
 """
 
 import urllib.request
@@ -26,7 +26,6 @@ TCP_TIMEOUT = 1.5
 XRAY_TIMEOUT = 5
 DELAY_BETWEEN = 0.3
 DELAY_BETWEEN_XRAY = 0.5
-GERMAN_TAGS = ["DE", "Germany", "Frankfurt", "de", "germany", "frankfurt"]   # без "443"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 TEST_URL = "https://api.ipify.org?format=json"
 
@@ -62,12 +61,8 @@ def get_my_ip() -> str:
 
 def is_desired(link: str) -> bool:
     """Проверяет, является ли ссылка немецкой и имеет порт 443."""
-    link_lower = link.lower()
-    has_tag = any(tag.lower() in link_lower for tag in GERMAN_TAGS)
-    if not has_tag:
-        return False
     host, port = extract_host_port(link)
-    return port == 443
+    return port == 443 and 'germany' in link.lower()
 
 def parse_vless_link(link: str) -> Optional[dict]:
     if not link.startswith('vless://'):
@@ -215,14 +210,13 @@ def fetch_links_from_sources(urls: List[str]) -> List[str]:
 def get_working_links(all_links: List[str]) -> List[str]:
     # Этап 1: TCP-фильтр (только желаемые: Германия + порт 443)
     tcp_passed_desired = []
-    print("Этап 1: TCP-проверка (только DE:443)...")
+    print("Этап 1: TCP-проверка (только Germany:443)...")
     for link in all_links:
         if is_desired(link) and is_vless_tcp_alive(link):
             tcp_passed_desired.append(link)
         time.sleep(DELAY_BETWEEN)
-    print(f"TCP-проверка: желаемых (DE:443) – {len(tcp_passed_desired)}")
+    print(f"TCP-проверка: желаемых (Germany:443) – {len(tcp_passed_desired)}")
 
-    # Если после TCP нет ни одной ссылки, не имеет смысла запускать Xray
     if not tcp_passed_desired:
         print("Нет ссылок, прошедших TCP-проверку. Завершение.")
         return []
@@ -241,12 +235,12 @@ def get_working_links(all_links: List[str]) -> List[str]:
             print("❌")
         time.sleep(DELAY_BETWEEN_XRAY)
 
-    print(f"Найдено Xray-рабочих (DE:443): {len(working)}")
+    print(f"Найдено Xray-рабочих (Germany:443): {len(working)}")
     if working:
         return working
     else:
-        # Запасной вариант: используем TCP-проверенные (тоже только DE:443)
-        print("ВНИМАНИЕ: Xray не нашёл рабочих ключей. Использую TCP-проверенные (DE:443) как запасной вариант.")
+        # Запасной вариант: используем TCP-проверенные (тоже только Germany:443)
+        print("ВНИМАНИЕ: Xray не нашёл рабочих ключей. Использую TCP-проверенные (Germany:443) как запасной вариант.")
         return tcp_passed_desired[:TARGET_COUNT]
 
 def save_subscription(links: List[str], txt_path: str, b64_path: str):
@@ -259,7 +253,7 @@ def save_subscription(links: List[str], txt_path: str, b64_path: str):
     print(f"Сохранено: {txt_path} ({len(links)} строк), {b64_path}")
 
 def main():
-    print("=== Генератор подписки VLESS (только Германия :443) ===")
+    print("=== Генератор подписки VLESS (только Germany :443) ===")
     real_ip = get_my_ip()
     print(f"Ваш реальный IP: {real_ip}")
     all_links = fetch_links_from_sources(SOURCE_URLS)
