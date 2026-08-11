@@ -18,8 +18,7 @@ from typing import List, Tuple, Optional
 
 # ------------------ Конфигурация ------------------
 SOURCE_URLS = [
-    "https://raw.githack.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-all.txt",
-    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-all.txt"
+    "https://raw.githack.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt"
 ]
 TARGET_COUNT = 30
 TCP_TIMEOUT = 1.5
