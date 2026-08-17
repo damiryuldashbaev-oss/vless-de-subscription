@@ -28,6 +28,12 @@ jobs:
       - name: Install Python dependencies
         run: pip install --upgrade requests
 
+      - name: Pull latest changes from remote
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main
+
       - name: Run generator
         run: python generate_sub.py
 
@@ -35,7 +41,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git pull --rebase origin main
           git add sub_de.txt sub_de_b64.txt
           git diff --staged --quiet || git commit -m "Auto-update subscription [skip ci]"
           git push
