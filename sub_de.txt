@@ -1,0 +1,1 @@
+vless://4bdeee92-97e8-414d-bef6-ec1d5e2ab73b@gerwai.loozerp.wiki:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=gerwai.loozerp.wiki&fp=random&pbk=EYfpgja4VjpLUnWHtDJQ1XZk6xL5j4rXwf80Sw6keV0&sid=0c13e8822e7f58aa&spx=%2F&type=tcp#%F0%9F%87%A9%F0%9F%87%AA%20Germany%2C%20Frankfurt%20am%20Main%20%28Innenstadt%20I%29%20%7C%20%F0%9F%8C%90%20%7C%20%5BBL%5D
