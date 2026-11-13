@@ -1,1 +1,0 @@
-vless://4b5bada6-0724-4cb1-8105-04737c8a7a3e@194.113.35.240:443?encryption=none&flow=xtls-rprx-vision&fp=firefox&pbk=ZKLerhOtbZ9D1Kvfz9w9LPGhYTQmfGs98HthyAy85AQ&security=reality&sid=503131904226bcad&sni=www.shinservice.ru&type=tcp#%F0%9F%87%A9%F0%9F%87%AA%20Germany%2C%20Frankfurt%20am%20Main%20%28Innenstadt%20I%29%20%7C%20%5BBL%5D
